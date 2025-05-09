@@ -1,7 +1,7 @@
-#include <WiFiManager.h>
 #include "esp_camera.h"
 #include <WiFi.h>
-
+#include <WiFiUdp.h>
+#include <MDNS_Generic.h>
 //
 // WARNING!!! PSRAM IC required for UXGA resolution and high JPEG quality
 //            Ensure ESP32 Wrover Module or other board with PSRAM is selected
@@ -15,14 +15,15 @@
 // Select camera model
 // ===================
 //#define CAMERA_MODEL_WROVER_KIT // Has PSRAM
-//#define CAMERA_MODEL_ESP_EYE // Has PSRAM
+//#define CAMERA_MODEL_ESP_EYE  // Has PSRAM
 //#define CAMERA_MODEL_ESP32S3_EYE // Has PSRAM
 //#define CAMERA_MODEL_M5STACK_PSRAM // Has PSRAM
 //#define CAMERA_MODEL_M5STACK_V2_PSRAM // M5Camera version B Has PSRAM
 //#define CAMERA_MODEL_M5STACK_WIDE // Has PSRAM
 //#define CAMERA_MODEL_M5STACK_ESP32CAM // No PSRAM
 //#define CAMERA_MODEL_M5STACK_UNITCAM // No PSRAM
-#define CAMERA_MODEL_AI_THINKER  // Has PSRAM
+//#define CAMERA_MODEL_M5STACK_CAMS3_UNIT  // Has PSRAM
+#define CAMERA_MODEL_AI_THINKER // Has PSRAM
 //#define CAMERA_MODEL_TTGO_T_JOURNAL // No PSRAM
 //#define CAMERA_MODEL_XIAO_ESP32S3 // Has PSRAM
 // ** Espressif Internal Boards **
@@ -32,21 +33,15 @@
 //#define CAMERA_MODEL_DFRobot_FireBeetle2_ESP32S3 // Has PSRAM
 //#define CAMERA_MODEL_DFRobot_Romeo_ESP32S3 // Has PSRAM
 #include "camera_pins.h"
+#include "secrets.h"
 
-// select which pin will trigger the configuration portal when set to LOW
-#define TRIGGER_PIN 13
-
-int timeout = 120;  // seconds to run for config portal
-bool CamOk;
-bool WifiOk;
+WiFiUDP udp;
+MDNS mdns(udp);
 
 void startCameraServer();
 void setupLedFlash(int pin);
-void set_led(bool en);
 
 void setup() {
-  WifiOk = false;
-  CamOk = false;
   Serial.begin(115200);
   Serial.setDebugOutput(true);
   Serial.println();
@@ -110,9 +105,8 @@ void setup() {
     Serial.printf("Camera init failed with error 0x%x", err);
     return;
   }
-  CamOk = true;
 
-  sensor_t* s = esp_camera_sensor_get();
+  sensor_t *s = esp_camera_sensor_get();
   // initial sensors are flipped vertically and colors are a bit saturated
   if (s->id.PID == OV3660_PID) {
     s->set_vflip(s, 1);        // flip it back
@@ -138,75 +132,39 @@ void setup() {
   setupLedFlash(LED_GPIO_NUM);
 #endif
 
-  // Config Portal
-  WiFiManager wm;
-
-  WiFi.mode(WIFI_AP_STA);
-#if defined(TRIGGER_PIN) 
-  pinMode(TRIGGER_PIN, INPUT_PULLUP);
-#endif
+  WiFi.begin(ssid, password);
   WiFi.setSleep(false);
 
-  if (wm.autoConnect("CamWifiConfigure","12345678")) {
-    Serial.println("Connected...yeey :)");
-    WifiOk = true;
-  } else {
-    Serial.println("ConfigPortal is running ...");
-    set_led (true);
-    delay (1000);
-    set_led (false);
+  Serial.print("WiFi connecting");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
   }
+  Serial.println("");
+  Serial.println("WiFi connected");
 
-  if (WifiOk) {
-    startCam();
-  }
-}
+  hostname.toLowerCase();
+  hostname.replace(" ",  "-");
+  hostname.replace("_",  "-");
 
-void startCam() {
+  mdns.begin(WiFi.localIP(), hostname.c_str());
+  Serial.print("Registering mDNS hostname: "); Serial.println(hostname);
+  Serial.print("To access, using "); Serial.print(hostname); Serial.println(".local");
+  mdns.addServiceRecord("ESP32Cam._http", 80, MDNSServiceTCP);
+  mdns.addServiceRecord("ESP32Cam._stream", 81, MDNSServiceTCP);
+
   startCameraServer();
 
   Serial.print("Camera Ready! Use 'http://");
   Serial.print(WiFi.localIP());
-  Serial.println("' to connect");
+  Serial.print("' or "); Serial.print(hostname); Serial.print(".local"); Serial.println(" to connect");
+  Serial.println(":81/stream for stream");
+  Serial.println("/capture to capture");
 }
 
 void loop() {
-#if defined(TRIGGER_PIN)
-  // is configuration portal requested?
-  if (digitalRead(TRIGGER_PIN) == LOW) {
-    if (!CamOk) {
-      Serial.println("Camera error. Restarting ...");
-      delay(3000);
-      ESP.restart();
-    } else {
-      Serial.println("Reconfigure connection");
-      set_led (true);
-      delay(3000);
-
-      WiFiManager wm;
-
-      // set configportal timeout
-      wm.setConfigPortalBlocking(true);
-      //WiFi.disconnect(); //  this alone is not enough to stop the autoconnecter
-      //WiFi.mode(WIFI_AP);
-      while (!wm.startConfigPortal("CamWifiConfigure","12345678")) {
-        Serial.println("Failed to connect. Restarting configuration ...");
-        delay(3000);
-      }
-
-      //if you get here you have connected to the WiFi
-      Serial.println("Connected...yeey :)");
-      set_led (false);
-      delay(1000);
-      if (!WifiOk) {
-        WifiOk = true;
-        startCam();
-      }
-    }
-  }
-#endif
-  Serial.print("Camera Ready! Use 'http://");
-  Serial.print(WiFi.localIP());
-  Serial.println("' to connect");
+  mdns.run ();
+  
+  // Do nothing. Everything is done in another task by the web server
   delay(10000);
 }
